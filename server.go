@@ -120,7 +120,8 @@ func defaulthandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Looking for OCSP Request %s", base64.RawStdEncoding.EncodeToString(body))
 	start := time.Now()
-	obj := bucketHandle.Object(base64.StdEncoding.EncodeToString(body))
+	gcsFilename := base64.RawURLEncoding.EncodeToString(body)
+	obj := bucketHandle.Object(gcsFilename)
 	rr, err := obj.NewReader(r.Context())
 	if err != nil {
 		log.Printf("Could not find OCSP Response Object. %v", err)
