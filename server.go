@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"io/ioutil"
@@ -88,6 +89,11 @@ func defaulthandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("OCSP Request for SerialNumber %x", ocspReq.SerialNumber)
 
+	nameHash := hex.EncodeToString(ocspReq.IssuerNameHash)
+	keyHash := hex.EncodeToString(ocspReq.IssuerKeyHash)
+	serialNumber := ocspReq.SerialNumber.Text(16)
+	gcsFilename := nameHash + "." + keyHash + "." + serialNumber
+
 	// TODO validate that this request is intended for a CA this  OCSP server is responsible for
 	// eg comppare ocspReq.IssuerKeyHash hash of the *issuer argument
 
@@ -120,7 +126,7 @@ func defaulthandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Looking for OCSP Request %s", base64.RawStdEncoding.EncodeToString(body))
 	start := time.Now()
-	obj := bucketHandle.Object(base64.StdEncoding.EncodeToString(body))
+	obj := bucketHandle.Object(gcsFilename)
 	rr, err := obj.NewReader(r.Context())
 	if err != nil {
 		log.Printf("Could not find OCSP Response Object. %v", err)

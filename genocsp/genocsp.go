@@ -21,10 +21,11 @@ import (
 	"net/http"
 
 	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/x509"
 
 	"bytes"
-	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"io/ioutil"
@@ -241,9 +242,15 @@ func genResponses(ctx context.Context, sn string) (res []ErrorResult) {
 				return
 			}
 
+			sum := sha1.Sum(parsedCert.RawSubject)
+			nameHash := hex.EncodeToString(bytes.NewBuffer(sum[:]).Bytes())
+			keyHash := hex.EncodeToString(parsedCert.SubjectKeyId)
+			serialNumber := intSerialNumber.Text(16)
+			gcsFilename := nameHash + "." + keyHash + "." + serialNumber
+
 			// we are passing in the NextUpdate time incase we ever want to add in GCS object attributes indicating that field.
 			// at the moment, it is not used.
-			err = uploadOCSPResponseWithReqBytes(ctx, base64.StdEncoding.EncodeToString(ocspReq), responseBytes, nextUpdate)
+			err = uploadOCSPResponseWithReqBytes(ctx, gcsFilename, responseBytes, nextUpdate)
 
 			if err != nil {
 				mu.Lock()
