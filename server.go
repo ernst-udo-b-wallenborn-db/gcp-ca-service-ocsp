@@ -87,19 +87,16 @@ func defaulthandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
-	log.Printf("OCSP Request for SerialNumber %x", ocspReq.SerialNumber)
 
-	nameHash := hex.EncodeToString(ocspReq.IssuerNameHash)
-	keyHash := hex.EncodeToString(ocspReq.IssuerKeyHash)
-	serialNumber := ocspReq.SerialNumber.Text(16)
-	gcsFilename := nameHash + "." + keyHash + "." + serialNumber
+	gcsFilename := generateCanonicalFilename(ocspReq)
+	log.Printf("OCSP Request for %s", gcsFilename)
 
 	// TODO validate that this request is intended for a CA this  OCSP server is responsible for
 	// eg comppare ocspReq.IssuerKeyHash hash of the *issuer argument
 
-	if ae, ok := cache.Get(fmt.Sprintf("%x", ocspReq.SerialNumber)); ok {
+	if ae, ok := cache.Get(fmt.Sprintf("%x", gcsFilename)); ok {
 		cachedResponse := ae.([]byte)
-		log.Printf("OCSP Request for SerialNumber %x returned from cache", ocspReq.SerialNumber)
+		log.Printf("OCSP Request for SerialNumber %x returned from cache", gcsFilename)
 		ocspResp, err := ocsp.ParseResponse(cachedResponse, issuerCert)
 		if err != nil {
 			log.Printf("Could not read GCS Response Object Body. %v", err)
@@ -108,8 +105,8 @@ func defaulthandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if ocspResp.NextUpdate.Before(time.Now()) {
-			log.Printf(">>  Certificate with serialNumber [%x] Stale; Removing from Cache.", ocspReq.SerialNumber)
-			cache.Remove(ocspReq.SerialNumber)
+			log.Printf(">>  Certificate with serialNumber [%x] Stale; Removing from Cache.", gcsFilename)
+			cache.Remove(gcsFilename)
 			// TODO: emit pubsub message where the subscriber can regenerate a new OCSP Response given the serial_number
 			// doing so will create a more dynamic OCSP system which will update responses before the batch OCSP Generator runs.
 		} else {
@@ -157,7 +154,7 @@ func defaulthandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Returning %x", ocspResp.SerialNumber)
 
-	cache.Add(fmt.Sprintf("%x", ocspReq.SerialNumber), rawOCSP)
+	cache.Add(fmt.Sprintf("%x", gcsFilename), rawOCSP)
 
 	if r.Method == http.MethodGet {
 		expireAt := ocspResp.NextUpdate.Format(http.TimeFormat)
@@ -166,6 +163,16 @@ func defaulthandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public")
 	w.Header().Set("Content-Type", "application/ocsp-response")
 	w.Write(rawOCSP)
+}
+
+func generateUrlFilename(req []byte) string {
+	return base64.RawURLEncoding.EncodeToString(req)
+}
+func generateCanonicalFilename(ocspReq *ocsp.Request) string {
+	nameHash := hex.EncodeToString(ocspReq.IssuerNameHash)
+	keyHash := hex.EncodeToString(ocspReq.IssuerKeyHash)
+	serialNumber := ocspReq.SerialNumber.Text(16)
+	return nameHash + "." + keyHash + "/" + serialNumber
 }
 
 func main() {

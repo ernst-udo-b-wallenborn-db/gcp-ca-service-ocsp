@@ -25,6 +25,7 @@ import (
 	"crypto/x509"
 
 	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
@@ -233,20 +234,22 @@ func genResponses(ctx context.Context, sn string) (res []ErrorResult) {
 			}
 
 			// Generate the OCSP Request to save as the actual  _filename_
-			ocspReqOpt := &ocsp.RequestOptions{}
-			ocspReq, err := ocsp.CreateRequest(parsedCert, iss, ocspReqOpt)
-			if err != nil {
-				mu.Lock()
-				aggregatedErrors = append(aggregatedErrors, ErrorResult{SerialNumber: sn, Message: "Error in ocsp.Request", Error: err})
-				mu.Unlock()
-				return
-			}
+			//ocspReqOpt := &ocsp.RequestOptions{}
+			//ocspReq, err := ocsp.CreateRequest(parsedCert, iss, ocspReqOpt)
+			//if err != nil {
+			//	mu.Lock()
+			//	aggregatedErrors = append(aggregatedErrors, ErrorResult{SerialNumber: sn, Message: "Error in ocsp.Request", Error: err})
+			//	mu.Unlock()
+			//	return
+			//}
+			//gcsFilename := generateUrlFilenameFromRequest(ocspReq)
 
-			sum := sha1.Sum(parsedCert.RawSubject)
-			nameHash := hex.EncodeToString(bytes.NewBuffer(sum[:]).Bytes())
-			keyHash := hex.EncodeToString(parsedCert.SubjectKeyId)
-			serialNumber := intSerialNumber.Text(16)
-			gcsFilename := nameHash + "." + keyHash + "." + serialNumber
+			//sum := sha1.Sum(parsedCert.RawSubject)
+			//nameHash := hex.EncodeToString(bytes.NewBuffer(sum[:]).Bytes())
+			//keyHash := hex.EncodeToString(parsedCert.SubjectKeyId)
+			//serialNumber := intSerialNumber.Text(16)
+			//gcsFilename := nameHash + "." + keyHash + "." + serialNumber
+			gcsFilename := generateCanonicalFilename(parsedCert)
 
 			// we are passing in the NextUpdate time incase we ever want to add in GCS object attributes indicating that field.
 			// at the moment, it is not used.
@@ -265,6 +268,18 @@ func genResponses(ctx context.Context, sn string) (res []ErrorResult) {
 	wg.Wait()
 
 	return aggregatedErrors
+}
+
+func generateUrlFilename(req []byte) string {
+	return base64.RawURLEncoding.EncodeToString(req)
+}
+
+func generateCanonicalFilename(cert *x509.Certificate) string {
+	sum := sha1.Sum(cert.RawIssuer)
+	nameHash := hex.EncodeToString(bytes.NewBuffer(sum[:]).Bytes())
+	keyHash := hex.EncodeToString(cert.AuthorityKeyId)
+	serialNumber := cert.SerialNumber.String()
+	return nameHash + "." + keyHash + "/" + serialNumber
 }
 
 func main() {
