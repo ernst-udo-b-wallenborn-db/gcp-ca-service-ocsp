@@ -1,0 +1,12 @@
+
+# Windows executables
+genocsp.exe
+server.exe
+
+# VSCode files
+.vscode
+
+# Emacs autosave files
+*~
+.*~
+
