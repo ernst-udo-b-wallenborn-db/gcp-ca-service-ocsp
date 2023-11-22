@@ -26,7 +26,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io/ioutil"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -41,15 +41,18 @@ import (
 const ()
 
 var (
-	httpPort      = flag.String("http_port", ":8080", "HTTP Server Port")
-	issuer        = flag.String("issuer", "", "Certificate Issuer PEM file")
-	ocsp_bucket   = flag.String("ocsp_bucket", "", "GCS Bucket with OCSP Responses")
-	cache_size    = flag.Int("cache_size", 2000, "LRU Cache Size")
+	httpPort    = flag.String("http_port", ":8080", "HTTP Server Port")
+	issuer      = flag.String("issuer", "", "Certificate Issuer PEM file")
+	ocsp_bucket = flag.String("ocsp_bucket", "", "GCS Bucket with OCSP Responses")
+	cache_size  = flag.Int("cache_size", 2000, "LRU Cache Size")
+	debug       = flag.Bool("debug", false, "Enable debug logging")
+
 	storageClient *storage.Client
 	bucketHandle  *storage.BucketHandle
 	issuerCert    *x509.Certificate
 
-	cache *lru.Cache
+	cache  *lru.Cache
+	logger slog.Logger
 )
 
 func defaulthandler(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +65,7 @@ func defaulthandler(w http.ResponseWriter, r *http.Request) {
 		// openssl sends the cert in POST
 		body, err = ioutil.ReadAll(r.Body)
 		if err != nil {
-			log.Printf("Error: Unable to read ocsp POST req... %v", err)
+			logger.Error("Error: Unable to read ocsp POST request", "error", err)
 			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 			return
 		}
@@ -70,42 +73,43 @@ func defaulthandler(w http.ResponseWriter, r *http.Request) {
 		rawReq := strings.TrimPrefix(r.URL.Path, "/")
 		rc, err := base64.StdEncoding.DecodeString(rawReq)
 		if err != nil {
-			log.Printf("Error: unable to read ocsp GET req... %v", err)
+			logger.Error("Error: unable to read ocsp GET request", "error", err)
 			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 			return
 		}
 		body = rc
 	} else {
-		log.Printf("Error: OCSP request must be get or post... %v", err)
+		logger.Error("Error: OCSP request must be GET or POST", "error", err)
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
 
+	logger.Debug("Incoming OCSP Request", "request", base64.StdEncoding.EncodeToString(body))
 	ocspReq, err := ocsp.ParseRequest(body)
 	if err != nil {
-		log.Printf("Could not parse OCSP Request... %v", err)
+		logger.Error("Could not parse OCSP Request", "error", err)
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
 
 	gcsFilename := generateCanonicalFilename(ocspReq)
-	log.Printf("OCSP Request for %s", gcsFilename)
+	logger.Info("Handling OCSP Request", "key", gcsFilename)
 
 	// TODO validate that this request is intended for a CA this  OCSP server is responsible for
 	// eg comppare ocspReq.IssuerKeyHash hash of the *issuer argument
 
 	if ae, ok := cache.Get(fmt.Sprintf("%x", gcsFilename)); ok {
 		cachedResponse := ae.([]byte)
-		log.Printf("OCSP Request for SerialNumber %x returned from cache", gcsFilename)
+		logger.Debug("Found OCSP Response in cache", "key", gcsFilename)
 		ocspResp, err := ocsp.ParseResponse(cachedResponse, issuerCert)
 		if err != nil {
-			log.Printf("Could not read GCS Response Object Body. %v", err)
+			logger.Error("Could not read GCS Response Object Body", "error", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
 
 		if ocspResp.NextUpdate.Before(time.Now()) {
-			log.Printf(">>  Certificate with serialNumber [%x] Stale; Removing from Cache.", gcsFilename)
+			logger.Info("Certificate stale: Removing from Cache", "key", gcsFilename)
 			cache.Remove(gcsFilename)
 			// TODO: emit pubsub message where the subscriber can regenerate a new OCSP Response given the serial_number
 			// doing so will create a more dynamic OCSP system which will update responses before the batch OCSP Generator runs.
@@ -121,20 +125,22 @@ func defaulthandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	log.Printf("Looking for OCSP Request %s", base64.RawStdEncoding.EncodeToString(body))
+	logger.Debug("Looking up OCSP Response in GCS", "key", gcsFilename)
 	start := time.Now()
 	obj := bucketHandle.Object(gcsFilename)
 	rr, err := obj.NewReader(r.Context())
 	if err != nil {
-		log.Printf("Could not find OCSP Response Object. %v", err)
+		logger.Error("Could not find OCSP Response Object", "error", err)
 		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		return
+	} else {
+		logger.Debug("Found OCSP Response in GCS", "key", gcsFilename)
 	}
 	defer rr.Close()
 
 	rawOCSP, err := ioutil.ReadAll(rr)
 	if err != nil {
-		log.Printf("Could not read GCS Response Object Body. %v", err)
+		logger.Error("Could not read GCS Response Object Body", "error", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -145,14 +151,14 @@ func defaulthandler(w http.ResponseWriter, r *http.Request) {
 	// phase...this is a TODO for later...
 	ocspResp, err := ocsp.ParseResponse(rawOCSP, issuerCert)
 	if err != nil {
-		log.Printf("Could not parse OCSP Response from GCS %v", err)
+		logger.Error("Could not parse OCSP Response from GCS", "error", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 	elapsed := time.Since(start)
-	log.Printf("Elapsed Time for OCSP lookup %s", elapsed)
+	logger.Debug("OCSP lookup finished", "elapsed", elapsed)
 
-	log.Printf("Returning %x", ocspResp.SerialNumber)
+	logger.Debug("Returning OCSP Response", "response", base64.StdEncoding.EncodeToString(rawOCSP))
 
 	cache.Add(fmt.Sprintf("%x", gcsFilename), rawOCSP)
 
@@ -180,30 +186,38 @@ func main() {
 	flag.Parse()
 	var err error
 
+	if *debug {
+		logger = *slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	} else {
+		logger = *slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+
 	if os.Getenv("OCSP_BUCKET") != "" && *ocsp_bucket == "" {
 		*ocsp_bucket = os.Getenv("OCSP_BUCKET")
 	}
 
 	if *ocsp_bucket == "" {
-		log.Fatalf("Either --ocsp_bucket or OCSP_BUCKET environment variable must be set")
+		logger.Error("Either --ocsp_bucket or OCSP_BUCKET environment variable must be set")
 	}
 
 	if *issuer != "" {
 		certPEM, err := ioutil.ReadFile(*issuer)
 		block, _ := pem.Decode([]byte(certPEM))
 		if block == nil {
-			log.Fatalf("failed to parse certificate PEM")
+			logger.Error("failed to parse certificate PEM")
 		}
 		issuerCert, err = x509.ParseCertificate(block.Bytes)
 		if err != nil {
-			log.Fatalf("failed to parse certificate: %v", err)
+			logger.Error("failed to parse certificate", "error", err)
 		}
 	} else {
 		issuerCert = nil
 	}
 	cache, err = lru.New(*cache_size)
 	if err != nil {
-		log.Fatalf("Could not initialize Cache" + err.Error())
+		logger.Error("Could not initialize Cache", "error", err)
+	} else {
+		logger.Info("Initialized LRU cache", "size", *cache_size)
 	}
 	r := mux.NewRouter()
 	r.HandleFunc("/", defaulthandler)
@@ -213,11 +227,13 @@ func main() {
 
 	storageClient, err = storage.NewClient(ctx)
 	if err != nil {
-		log.Fatalf("Could not init gcs client: %v", err)
+		logger.Error("Could not init gcs client", "error", err)
+	} else {
+		logger.Info("Initialized Google Cloud Storage", "bucket", *ocsp_bucket)
 	}
 	bucketHandle = storageClient.Bucket(*ocsp_bucket)
 
-	log.Println("Starting OCSP Server")
+	logger.Info("Starting OCSP Server", "port", *httpPort)
 
 	httpSrv := &http.Server{
 		Addr:    *httpPort,
@@ -227,7 +243,7 @@ func main() {
 
 	err = httpSrv.ListenAndServe()
 	if err != nil {
-		log.Fatal("Web server (HTTP): ", err)
+		logger.Error("Web server (HTTP): ", "error", err)
 	}
 
 }
